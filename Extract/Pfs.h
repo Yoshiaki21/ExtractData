@@ -2,7 +2,11 @@
 
 #include "ExtractBase.h"
 
+struct SFileInfo;
+
 // Artemis engine .pfs archives ("pf8"), whose entries are XORed with the SHA-1 of the index.
+// The game data is split into "xxx.pfs", "xxx.pfs.000", "xxx.pfs.001", ...; opening "xxx.pfs"
+// lists all of them together.
 //
 // Standing sprites are stored as body and face parts that carry their screen position
 // in a PNG text chunk. When the extras table (exlist.ipt) is present, every body/face
@@ -27,6 +31,7 @@ private:
 		std::vector<u8> pixels; // Top-down BGRA
 	};
 
+	bool ReadPart(CArcFile* archive, std::vector<SFileInfo>* file_infos, std::vector<u32>* parts, std::vector<Key>* keys, std::unordered_set<std::string>* names);
 	bool DecodeSprite(CArcFile* archive, const Key& key);
 
 	// Returns either the cached body or `scratch`, or nullptr on failure.

@@ -19,9 +19,43 @@ constexpr TCHAR sprite_format[] = _T("FG");
 // Sprites exist in three sizes that differ only in resolution; only the largest is composed
 constexpr char sprite_size[] = "z2";
 
-bool IsPfs(CArcFile* archive)
+std::string ToLower(std::string str)
 {
-	return lstrcmpi(archive->GetArcExten(), _T(".pfs")) == 0 && std::memcmp(archive->GetHeader(), "pf8", 3) == 0;
+	for (auto& c : str)
+	{
+		if (c >= 'A' && c <= 'Z')
+			c = static_cast<char>(c - 'A' + 'a');
+	}
+
+	return str;
+}
+
+bool EndsWith(const std::string& str, const std::string& suffix)
+{
+	return str.size() >= suffix.size() && str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+/// The game data is split into "xxx.pfs" (main) and "xxx.pfs.000", "xxx.pfs.001", ...
+///
+/// @param is_main Set to true for "xxx.pfs"
+bool IsPfsPath(LPCTSTR path, bool* is_main)
+{
+	const std::string lower = ToLower(path);
+	if (EndsWith(lower, ".pfs"))
+	{
+		*is_main = true;
+		return true;
+	}
+
+	const size_t dot = lower.rfind('.');
+	if (dot == std::string::npos || dot + 1 == lower.size() ||
+	    !std::all_of(lower.begin() + dot + 1, lower.end(), [](char c) { return c >= '0' && c <= '9'; }))
+	{
+		return false;
+	}
+
+	*is_main = false;
+	return EndsWith(lower.substr(0, dot), ".pfs");
 }
 
 bool Sha1(const u8* data, size_t size, CPfs::Key* out)
@@ -48,10 +82,14 @@ bool Sha1(const u8* data, size_t size, CPfs::Key* out)
 
 bool ReadIndex(CArcFile* archive, std::vector<u8>* index)
 {
+	char signature[3];
 	u32 index_size;
-	archive->SeekHed(3);
-	if (!archive->ReadU32(&index_size))
+	archive->SeekHed();
+	if (archive->Read(signature, sizeof(signature)) != sizeof(signature) || std::memcmp(signature, "pf8", 3) != 0 ||
+	    !archive->ReadU32(&index_size))
+	{
 		return false;
+	}
 
 	if (index_size < sizeof(u32) || index_size > archive->GetArcSize() - index_offset)
 		return false;
@@ -137,22 +175,6 @@ bool ReadDecrypted(CArcFile* archive, u64 start, u32 size, const CPfs::Key& key,
 		(*out)[i] ^= key[i % CPfs::key_size];
 
 	return true;
-}
-
-std::string ToLower(std::string str)
-{
-	for (auto& c : str)
-	{
-		if (c >= 'A' && c <= 'Z')
-			c = static_cast<char>(c - 'A' + 'a');
-	}
-
-	return str;
-}
-
-bool EndsWith(const std::string& str, const std::string& suffix)
-{
-	return str.size() >= suffix.size() && str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 /// A value of a Lua table constructor
@@ -385,12 +407,16 @@ bool ReadPngPosition(const std::vector<u8>& png, s32* x, s32* y)
 ///
 /// The combinations are taken from the extras table ("pc\<language>\extra\exlist.ipt").
 ///
-/// @param hidden   Set to true for every entry that is consumed by a composed entry
-/// @param sprites  Receives the composed entries
-void ComposeSprites(CArcFile* archive, const CPfs::Key& key, const std::vector<SFileInfo>& file_infos, std::vector<bool>* hidden, std::vector<SFileInfo>* sprites)
+/// @param keys         Decryption keys by split archive ID
+/// @param parts        Split archive ID of each entry of `file_infos`
+/// @param hidden       Set to true for every entry that is consumed by a composed entry
+/// @param sprites      Receives the composed entries
+/// @param sprite_parts Receives the split archive ID of each composed entry
+void ComposeSprites(CArcFile* archive, const std::vector<CPfs::Key>& keys, const std::vector<SFileInfo>& file_infos, const std::vector<u32>& parts,
+                    std::vector<bool>* hidden, std::vector<SFileInfo>* sprites, std::vector<u32>* sprite_parts)
 {
 	std::unordered_map<std::string, size_t> entries_by_name;
-	const SFileInfo* table_entry = nullptr;
+	size_t table_entry = SIZE_MAX;
 
 	for (size_t i = 0; i < file_infos.size(); i++)
 	{
@@ -398,15 +424,17 @@ void ComposeSprites(CArcFile* archive, const CPfs::Key& key, const std::vector<S
 		entries_by_name.emplace(name, i);
 
 		// Prefer the Japanese table when there are several languages
-		if (EndsWith(name, "\\extra\\exlist.ipt") && (table_entry == nullptr || name.find("\\ja\\") != std::string::npos))
-			table_entry = &file_infos[i];
+		if (EndsWith(name, "\\extra\\exlist.ipt") && (table_entry == SIZE_MAX || name.find("\\ja\\") != std::string::npos))
+			table_entry = i;
 	}
 
-	if (table_entry == nullptr)
+	if (table_entry == SIZE_MAX)
 		return;
 
 	std::vector<u8> table_data;
-	if (!ReadDecrypted(archive, table_entry->start, table_entry->size_cmp, key, &table_data))
+	const u32 table_part = parts[table_entry];
+	archive->SetArcsID(table_part);
+	if (!ReadDecrypted(archive, file_infos[table_entry].start, file_infos[table_entry].size_cmp, keys[table_part], &table_data))
 		return;
 
 	LuaValue table;
@@ -476,8 +504,9 @@ void ComposeSprites(CArcFile* archive, const CPfs::Key& key, const std::vector<S
 
 				for (const auto& face_id : pose_faces->Scalars())
 				{
+					// Both parts are read from the same file when composing
 					const size_t face = find_entry(dir + face_id + ".png");
-					if (face == SIZE_MAX)
+					if (face == SIZE_MAX || parts[face] != parts[body])
 						continue;
 
 					combinations.push_back({body, face, dir + body_stem + "_" + face_id + ".png"});
@@ -515,6 +544,7 @@ void ComposeSprites(CArcFile* archive, const CPfs::Key& key, const std::vector<S
 		}
 
 		sprites->push_back(std::move(file_info));
+		sprite_parts->push_back(parts[combination.body]);
 		(*hidden)[combination.body] = true;
 		(*hidden)[combination.face] = true;
 	}
@@ -531,34 +561,96 @@ bool ReportFailure(CArcFile* archive)
 } // Anonymous namespace
 
 /// Mounting
+///
+/// Opening "xxx.pfs" also opens "xxx.pfs.000", "xxx.pfs.001", ... from the same folder and lists
+/// the files of all of them together. A numbered part that is opened directly is listed on its own.
 bool CPfs::Mount(CArcFile* archive)
 {
-	if (!IsPfs(archive))
+	bool is_main;
+	if (!IsPfsPath(archive->GetArcPath(), &is_main))
 		return false;
 
-	std::vector<u8> index;
 	std::vector<SFileInfo> file_infos;
-	Key key;
-	if (!ReadIndex(archive, &index) || !ParseIndex(index, archive->GetArcSize(), &file_infos) || !Sha1(index.data(), index.size(), &key))
+	std::vector<u32> parts; // Split archive ID of each entry
+	std::vector<Key> keys;  // By split archive ID
+	std::unordered_set<std::string> names;
+
+	if (!ReadPart(archive, &file_infos, &parts, &keys, &names))
 	{
 		archive->SeekHed();
 		return false;
 	}
 
-	m_keys[archive->GetArcPath().GetString()] = key;
+	if (is_main)
+	{
+		const YCString main_path = archive->GetArcPath();
+
+		for (u32 number = 0; number < 1000; number++)
+		{
+			TCHAR part_path[MAX_PATH];
+			_stprintf(part_path, _T("%s.%03u"), main_path.GetString(), number);
+
+			// CArcFile::Open() reports missing files, so check first
+			if (!PathFileExists(part_path) || !archive->Open(part_path))
+				break;
+
+			archive->GetProg()->ReplaceAllFileSize(archive->GetArcSize());
+
+			// A damaged part only loses its own files
+			ReadPart(archive, &file_infos, &parts, &keys, &names);
+		}
+	}
 
 	std::vector<bool> hidden(file_infos.size());
 	std::vector<SFileInfo> sprites;
-	ComposeSprites(archive, key, file_infos, &hidden, &sprites);
+	std::vector<u32> sprite_parts;
+	ComposeSprites(archive, keys, file_infos, parts, &hidden, &sprites, &sprite_parts);
 
 	for (size_t i = 0; i < file_infos.size(); i++)
 	{
 		if (!hidden[i])
+		{
+			archive->SetArcsID(parts[i]);
 			archive->AddFileInfo(file_infos[i]);
+		}
 	}
 
-	for (auto& file_info : sprites)
-		archive->AddFileInfo(file_info);
+	for (size_t i = 0; i < sprites.size(); i++)
+	{
+		archive->SetArcsID(sprite_parts[i]);
+		archive->AddFileInfo(sprites[i]);
+	}
+
+	archive->SetFirstArc();
+	return true;
+}
+
+/// Reads the index of the current split archive and appends its files.
+///
+/// @param names Lower-case names of the files listed so far; a file that already appears
+///              in an earlier part is skipped (the parts share identical copies)
+bool CPfs::ReadPart(CArcFile* archive, std::vector<SFileInfo>* file_infos, std::vector<u32>* parts, std::vector<Key>* keys, std::unordered_set<std::string>* names)
+{
+	const u32 part = archive->GetArcsID();
+	if (keys->size() <= part)
+		keys->resize(part + 1);
+
+	std::vector<u8> index;
+	std::vector<SFileInfo> part_infos;
+	Key& key = (*keys)[part];
+	if (!ReadIndex(archive, &index) || !ParseIndex(index, archive->GetArcSize(), &part_infos) || !Sha1(index.data(), index.size(), &key))
+		return false;
+
+	m_keys[archive->GetArcPath().GetString()] = key;
+
+	for (auto& file_info : part_infos)
+	{
+		if (!names->insert(ToLower(file_info.name.GetString())).second)
+			continue;
+
+		file_infos->push_back(std::move(file_info));
+		parts->push_back(part);
+	}
 
 	return true;
 }
@@ -568,7 +660,8 @@ bool CPfs::Mount(CArcFile* archive)
 /// Every entry is encrypted, so all of them are handled here.
 bool CPfs::Decode(CArcFile* archive)
 {
-	if (!IsPfs(archive))
+	bool is_main;
+	if (!IsPfsPath(archive->GetArcPath(), &is_main))
 		return false;
 
 	const auto found = m_keys.find(archive->GetArcPath().GetString());
