@@ -46,7 +46,7 @@ void CZlib::DecompressFile(CArcFile* archive)
 // Function to expand memory with zlib
 int CZlib::Decompress(u8* dst, u32* dst_size, const u8* src, u32 src_size)
 {
-  unsigned long dst_size_tmp = 0;
+  unsigned long dst_size_tmp = *dst_size;
 	const int result = uncompress(dst, &dst_size_tmp, src, src_size);
 
   *dst_size = static_cast<u32>(dst_size_tmp);
