@@ -23,6 +23,9 @@ enum PackMethod : u32
 // SFileInfo::format of entries that are composed from an .spm sprite frame
 constexpr TCHAR composed_format[] = _T("SPM");
 
+// SFileInfo::format of event CG differences that are composed onto their base image
+constexpr TCHAR visual_format[] = _T("VISUAL");
+
 class BitReader
 {
 public:
@@ -185,6 +188,8 @@ public:
 		return true;
 	}
 
+	bool AtEnd() const { return m_pos == m_data.size(); }
+
 private:
 	const std::vector<u8>& m_data;
 	size_t m_pos;
@@ -301,11 +306,13 @@ bool ParseSpm(const std::vector<u8>& data, Spm* spm)
 	return true;
 }
 
-bool ReadData(CArcFile* archive, u64 start, u32 packed_size, u32 original_size, bool compressed, std::vector<u8>* out)
+// `Reader` is CArcFile or YCFile (for reading a sibling archive)
+template <typename Reader>
+bool ReadData(Reader* reader, u64 start, u32 packed_size, u32 original_size, bool compressed, std::vector<u8>* out)
 {
 	std::vector<u8> packed(packed_size);
-	archive->SeekHed(start);
-	if (archive->Read(packed.data(), packed_size) != packed_size)
+	reader->SeekHed(start);
+	if (reader->Read(packed.data(), packed_size) != packed_size)
 		return false;
 
 	if (!compressed)
@@ -319,9 +326,10 @@ bool ReadData(CArcFile* archive, u64 start, u32 packed_size, u32 original_size, 
 	return zlib.Decompress(out->data(), original_size, packed.data(), packed_size) == Z_OK;
 }
 
-bool ReadEntry(CArcFile* archive, const SFileInfo& file_info, std::vector<u8>* out)
+template <typename Reader>
+bool ReadEntry(Reader* reader, const SFileInfo& file_info, std::vector<u8>* out)
 {
-	return ReadData(archive, file_info.start, file_info.size_cmp, file_info.size_org, file_info.format == _T("zlib"), out);
+	return ReadData(reader, file_info.start, file_info.size_cmp, file_info.size_org, file_info.format == _T("zlib"), out);
 }
 
 bool ReadPngSize(CArcFile* archive, const SFileInfo& file_info, u32* width, u32* height)
@@ -625,47 +633,53 @@ void BlendOver(std::vector<u8>& dst, u32 dst_width, const std::vector<u8>& src, 
 		}
 	}
 }
-} // Anonymous namespace
 
-/// Mounting
-bool CNexas::Mount(CArcFile* archive)
+bool ReportComposeFailure(CArcFile* archive)
 {
-	if (lstrcmpi(archive->GetArcExten(), _T(".pac")) != 0)
-		return false;
+	CError error;
+	error.Message(archive->GetProg()->GetHandle(), _T("Failed to compose %s"), archive->GetOpenFileInfo()->name.GetString());
 
-	if (std::memcmp(archive->GetHeader(), "PAC", 3) != 0)
-		return false;
+	// The entry has been handled; falling back to the standard decoders would write garbage
+	return true;
+}
 
-	const u64 archive_size = archive->GetArcSize();
+/// Reads and validates the index of a NeXAS .pac archive.
+///
+/// @param reader       CArcFile or YCFile
+/// @param archive_size Size of the archive in bytes
+///
+template <typename Reader>
+bool ReadPacIndex(Reader* reader, u64 archive_size, std::vector<SFileInfo>* file_infos)
+{
 	if (archive_size < header_size + 4)
+		return false;
+
+	std::array<u8, header_size> header;
+	reader->SeekHed();
+	if (reader->Read(header.data(), header_size) != header_size || std::memcmp(header.data(), "PAC", 3) != 0)
 		return false;
 
 	u32 num_files;
 	u32 pack_method;
-	archive->SeekHed(4);
-	archive->ReadU32(&num_files);
-	archive->ReadU32(&pack_method);
+	std::memcpy(&num_files, &header[4], sizeof(u32));
+	std::memcpy(&pack_method, &header[8], sizeof(u32));
 
 	if (num_files == 0 || (pack_method != PACK_NONE && pack_method != PACK_ZLIB))
-	{
-		archive->SeekHed();
 		return false;
-	}
 
 	// The last four bytes hold the size of the compressed index that precedes them
 	u32 index_size;
-	archive->SeekEnd(4);
-	archive->ReadU32(&index_size);
+	reader->SeekEnd(4);
+	if (reader->Read(&index_size, sizeof(u32)) != sizeof(u32))
+		return false;
 
 	if (index_size == 0 || index_size > archive_size - header_size - 4)
-	{
-		archive->SeekHed();
 		return false;
-	}
 
 	std::vector<u8> packed_index(index_size);
-	archive->SeekEnd(4 + static_cast<s64>(index_size));
-	archive->Read(packed_index.data(), index_size);
+	reader->SeekEnd(4 + static_cast<s64>(index_size));
+	if (reader->Read(packed_index.data(), index_size) != index_size)
+		return false;
 
 	for (auto& byte : packed_index)
 		byte ^= 0xFF;
@@ -673,14 +687,11 @@ bool CNexas::Mount(CArcFile* archive)
 	std::vector<u8> index(static_cast<size_t>(num_files) * entry_size);
 	HuffmanDecoder decoder(packed_index);
 	if (!decoder.Decode(index.data(), index.size()))
-	{
-		archive->SeekHed();
 		return false;
-	}
 
-	// Validate every entry before adding anything, so that other
+	// Validate every entry before returning anything, so that other
 	// "PAC" formats (e.g. CBaldr) still get a chance to mount.
-	std::vector<SFileInfo> file_infos(num_files);
+	file_infos->assign(num_files, SFileInfo());
 	for (u32 i = 0; i < num_files; i++)
 	{
 		const u8* entry = &index[i * entry_size];
@@ -696,12 +707,9 @@ bool CNexas::Mount(CArcFile* archive)
 		std::memcpy(&packed_size, &entry[entry_name_size + 8], sizeof(u32));
 
 		if (name[0] == '\0' || offset < header_size || static_cast<u64>(offset) + packed_size > archive_size)
-		{
-			archive->SeekHed();
 			return false;
-		}
 
-		SFileInfo& file_info = file_infos[i];
+		SFileInfo& file_info = (*file_infos)[i];
 		file_info.name = name;
 		file_info.start = offset;
 		file_info.end = file_info.start + packed_size;
@@ -713,11 +721,200 @@ bool CNexas::Mount(CArcFile* archive)
 			file_info.format = _T("zlib");
 	}
 
-	std::vector<bool> hidden(num_files);
+	return true;
+}
+
+/// One row of the event CG table (e.g. visual.dat in Config.pac)
+struct VisualRow
+{
+	std::string base;
+	std::string diff; // Empty when the row shows the base image alone
+	s32 x = 0;
+	s32 y = 0;
+};
+
+bool ParseVisualTable(const std::vector<u8>& data, std::vector<VisualRow>* rows)
+{
+	// Column types: 1 = string, 2 = integer
+	static constexpr std::array<s32, 14> expected_types{{2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 2, 2, 2, 2}};
+
+	ByteReader reader(data, 0);
+
+	s32 num_columns;
+	if (!reader.ReadS32(&num_columns) || num_columns != static_cast<s32>(expected_types.size()))
+		return false;
+
+	for (const s32 expected : expected_types)
+	{
+		s32 type;
+		if (!reader.ReadS32(&type) || type != expected)
+			return false;
+	}
+
+	while (!reader.AtEnd())
+	{
+		// Colour/brightness parameters, base, diff, diff position, canvas size
+		VisualRow row;
+		s32 ignored;
+		for (int i = 0; i < 8; i++)
+		{
+			if (!reader.ReadS32(&ignored))
+				return false;
+		}
+
+		s32 width;
+		s32 height;
+		if (!reader.ReadString(&row.base) || !reader.ReadString(&row.diff) ||
+		    !reader.ReadS32(&row.x) || !reader.ReadS32(&row.y) || !reader.ReadS32(&width) || !reader.ReadS32(&height))
+		{
+			return false;
+		}
+
+		rows->push_back(std::move(row));
+	}
+
+	return true;
+}
+
+/// Turns the event CG differences listed in `file_infos` into complete images.
+///
+/// The positions of the differences are not stored in the archive itself but in
+/// "<archive name>.dat" inside Config.pac, which lives in the same folder.
+void ComposeVisuals(CArcFile* archive, std::vector<SFileInfo>* file_infos)
+{
+	TCHAR table_name[MAX_PATH];
+	lstrcpyn(table_name, PathFindFileName(archive->GetArcPath()), MAX_PATH - 4);
+	PathRemoveExtension(table_name);
+	lstrcat(table_name, _T(".dat"));
+
+	TCHAR config_path[MAX_PATH];
+	lstrcpyn(config_path, archive->GetArcPath(), MAX_PATH);
+	PathRemoveFileSpec(config_path);
+	if (!PathAppend(config_path, _T("Config.pac")))
+		return;
+
+	YCFile config;
+	if (!config.Open(config_path, YCFile::modeRead | YCFile::shareDenyNone))
+		return;
+
+	std::vector<SFileInfo> config_infos;
+	if (!ReadPacIndex(&config, config.GetLength(), &config_infos))
+		return;
+
+	const std::string lower_table_name = ToLower(table_name);
+	const auto table = std::find_if(config_infos.begin(), config_infos.end(), [&lower_table_name](const SFileInfo& file_info) {
+		return ToLower(file_info.name.GetString()) == lower_table_name;
+	});
+	if (table == config_infos.end())
+		return;
+
+	std::vector<u8> table_data;
+	std::vector<VisualRow> rows;
+	if (!ReadEntry(&config, *table, &table_data) || !ParseVisualTable(table_data, &rows))
+		return;
+
+	std::unordered_map<std::string, size_t> entries_by_name;
+	for (size_t i = 0; i < file_infos->size(); i++)
+		entries_by_name.emplace(ToLower((*file_infos)[i].name.GetString()), i);
+
+	for (const auto& row : rows)
+	{
+		if (row.diff.empty() || row.x < 0 || row.y < 0)
+			continue;
+
+		const auto base = entries_by_name.find(ToLower(row.base));
+		const auto diff = entries_by_name.find(ToLower(row.diff));
+		if (base == entries_by_name.end() || diff == entries_by_name.end() || base->second == diff->second)
+			continue;
+
+		const SFileInfo& base_info = (*file_infos)[base->second];
+		SFileInfo& diff_info = (*file_infos)[diff->second];
+		if (base_info.format == visual_format || diff_info.format == visual_format)
+			continue;
+
+		// [0] is the base image and [1] the difference; the entry keeps its name
+		for (const SFileInfo* source : {&base_info, static_cast<const SFileInfo*>(&diff_info)})
+		{
+			diff_info.starts.push_back(static_cast<u32>(source->start));
+			diff_info.sizes_cmp.push_back(source->size_cmp);
+			diff_info.sizes_org.push_back(source->size_org);
+			diff_info.compress_checks.push_back(source->format == _T("zlib"));
+		}
+
+		diff_info.format = visual_format;
+		diff_info.size_org = base_info.size_org;
+		diff_info.key = static_cast<u32>(row.x);
+		diff_info.type = static_cast<u32>(row.y);
+	}
+}
+
+/// View of an uncompressed 24-bit BMP file
+struct Bmp24
+{
+	u32 width = 0;
+	u32 height = 0;
+	bool bottom_up = true;
+	size_t pitch = 0;
+	const u8* pixels = nullptr;
+
+	// Row `y` counted from the top
+	const u8* Row(u32 y) const { return pixels + (bottom_up ? height - 1 - y : y) * pitch; }
+};
+
+bool ParseBmp24(const std::vector<u8>& data, Bmp24* bmp)
+{
+	if (data.size() < 54 || data[0] != 'B' || data[1] != 'M')
+		return false;
+
+	u32 pixel_offset;
+	s32 width;
+	s32 height;
+	u16 bpp;
+	u32 compression;
+	std::memcpy(&pixel_offset, &data[10], sizeof(u32));
+	std::memcpy(&width, &data[18], sizeof(s32));
+	std::memcpy(&height, &data[22], sizeof(s32));
+	std::memcpy(&bpp, &data[28], sizeof(u16));
+	std::memcpy(&compression, &data[30], sizeof(u32));
+
+	if (bpp != 24 || compression != BI_RGB || width <= 0 || height == 0 || width > 16384 || height > 16384 || height < -16384)
+		return false;
+
+	bmp->width = static_cast<u32>(width);
+	bmp->height = static_cast<u32>(height < 0 ? -height : height);
+	bmp->bottom_up = height > 0;
+	bmp->pitch = (static_cast<size_t>(bmp->width) * 3 + 3) & ~static_cast<size_t>(3);
+
+	if (pixel_offset > data.size() || data.size() - pixel_offset < bmp->pitch * bmp->height)
+		return false;
+
+	bmp->pixels = &data[pixel_offset];
+	return true;
+}
+} // Anonymous namespace
+
+/// Mounting
+bool CNexas::Mount(CArcFile* archive)
+{
+	if (lstrcmpi(archive->GetArcExten(), _T(".pac")) != 0)
+		return false;
+
+	if (std::memcmp(archive->GetHeader(), "PAC", 3) != 0)
+		return false;
+
+	std::vector<SFileInfo> file_infos;
+	if (!ReadPacIndex(archive, archive->GetArcSize(), &file_infos))
+	{
+		archive->SeekHed();
+		return false;
+	}
+
+	std::vector<bool> hidden(file_infos.size());
 	std::vector<SFileInfo> composed;
 	ComposeSprites(archive, file_infos, &hidden, &composed);
+	ComposeVisuals(archive, &file_infos);
 
-	for (u32 i = 0; i < num_files; i++)
+	for (size_t i = 0; i < file_infos.size(); i++)
 	{
 		if (!hidden[i])
 			archive->AddFileInfo(file_infos[i]);
@@ -731,22 +928,39 @@ bool CNexas::Mount(CArcFile* archive)
 
 /// Decoding
 ///
-/// Composes one .spm frame and writes it as an image.
+/// Composes sprite frames and event CG differences; other entries are left to the standard decoders.
 bool CNexas::Decode(CArcFile* archive)
 {
 	const SFileInfo* file_info = archive->GetOpenFileInfo();
 
-	if (file_info->format != composed_format || file_info->starts.size() < 2)
+	if (file_info->starts.size() < 2)
 		return false;
 
 	if (lstrcmpi(archive->GetArcExten(), _T(".pac")) != 0 || std::memcmp(archive->GetHeader(), "PAC", 3) != 0)
 		return false;
 
-	const auto fail = [archive, file_info] {
-		CError error;
-		error.Message(archive->GetProg()->GetHandle(), _T("Failed to compose %s"), file_info->name.GetString());
-		return true;
-	};
+	if (file_info->format == composed_format)
+		return DecodeSprite(archive);
+
+	if (file_info->format == visual_format)
+		return DecodeVisual(archive);
+
+	return false;
+}
+
+/// Extraction
+///
+/// Composed entries have no original file, so they are always composed.
+bool CNexas::Extract(CArcFile* archive)
+{
+	return Decode(archive);
+}
+
+/// Composes one .spm frame and writes it as an image.
+bool CNexas::DecodeSprite(CArcFile* archive)
+{
+	const SFileInfo* file_info = archive->GetOpenFileInfo();
+	const auto fail = [archive] { return ReportComposeFailure(archive); };
 
 	std::vector<u8> spm_data;
 	Spm spm;
@@ -789,12 +1003,68 @@ bool CNexas::Decode(CArcFile* archive)
 	return true;
 }
 
-/// Extraction
+/// Draws an event CG difference onto its base image and writes the result.
 ///
-/// Composed entries have no original file, so they are always composed.
-bool CNexas::Extract(CArcFile* archive)
+/// Black pixels of the difference are transparent.
+bool CNexas::DecodeVisual(CArcFile* archive)
 {
-	return Decode(archive);
+	const SFileInfo* file_info = archive->GetOpenFileInfo();
+	const auto fail = [archive] { return ReportComposeFailure(archive); };
+
+	// Many differences share one base image
+	const u64 base_offset = file_info->starts[0];
+	if (m_cached_base.empty() || m_cached_base_offset != base_offset || m_cached_base_path != archive->GetArcPath())
+	{
+		m_cached_base.clear();
+		if (!ReadData(archive, base_offset, file_info->sizes_cmp[0], file_info->sizes_org[0], file_info->compress_checks[0] != 0, &m_cached_base))
+		{
+			m_cached_base.clear();
+			return fail();
+		}
+
+		m_cached_base_path = archive->GetArcPath();
+		m_cached_base_offset = base_offset;
+	}
+
+	std::vector<u8> diff_data;
+	if (!ReadData(archive, file_info->starts[1], file_info->sizes_cmp[1], file_info->sizes_org[1], file_info->compress_checks[1] != 0, &diff_data))
+		return fail();
+
+	Bmp24 base;
+	Bmp24 diff;
+	if (!ParseBmp24(m_cached_base, &base) || !ParseBmp24(diff_data, &diff))
+		return fail();
+
+	const u32 x = file_info->key;
+	const u32 y = file_info->type;
+	if (static_cast<u64>(x) + diff.width > base.width || static_cast<u64>(y) + diff.height > base.height)
+		return fail();
+
+	// Bottom-up rows with BMP padding, as CImage::Write() expects
+	std::vector<u8> canvas(base.pitch * base.height);
+	const auto canvas_row = [&canvas, &base](u32 row) { return &canvas[(base.height - 1 - row) * base.pitch]; };
+
+	for (u32 row = 0; row < base.height; row++)
+		std::memcpy(canvas_row(row), base.Row(row), base.pitch);
+
+	for (u32 row = 0; row < diff.height; row++)
+	{
+		const u8* src = diff.Row(row);
+		u8* dst = canvas_row(y + row) + x * 3;
+
+		for (u32 col = 0; col < diff.width; col++, src += 3, dst += 3)
+		{
+			if (src[0] != 0 || src[1] != 0 || src[2] != 0)
+				std::memcpy(dst, src, 3);
+		}
+	}
+
+	CImage image;
+	image.Init(archive, static_cast<s32>(base.width), static_cast<s32>(base.height), 24);
+	image.Write(canvas.data(), canvas.size());
+	image.Close();
+
+	return true;
 }
 
 const CNexas::Bitmap* CNexas::DecodePart(CArcFile* archive, size_t part, Bitmap* scratch)
