@@ -179,6 +179,7 @@
     <ClCompile Include="UI\WindowBase.cpp" />
     <ClCompile Include="UI\WinMain.cpp" />
     <ClCompile Include="Utils\BitUtils.cpp" />
+    <ClCompile Include="Utils\ImageUtils.cpp" />
     <ClCompile Include="Extract\Ahx.cpp" />
     <ClCompile Include="Extract\Alcot.cpp" />
     <ClCompile Include="Extract\AOS.cpp" />
@@ -328,6 +329,7 @@
     <ClInclude Include="UI\WindowBase.h" />
     <ClInclude Include="UI\WinMain.h" />
     <ClInclude Include="Utils\BitUtils.h" />
+    <ClInclude Include="Utils\ImageUtils.h" />
     <ClInclude Include="Extract\Ahx.h" />
     <ClInclude Include="Extract\Alcot.h" />
     <ClInclude Include="Extract\AOS.h" />
