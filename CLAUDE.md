@@ -69,7 +69,8 @@
 | アプリのエントリポイント / メインウィンドウ | `UI/WinMain.cpp`（`_tWinMain` → `CWinMain`） |
 | 新しいアーカイブ形式（ゲーム）への対応を追加 | `Extract/<Name>.{h,cpp}` に `CExtractBase` 派生クラスを作成 → `Extract.cpp` の `#include` と `CExtract::SetClass()` に登録 → `ExtractData.vcxproj` と `.filters` に追加 |
 | Giga NeXAS の `.pac`（末尾に Huffman 圧縮インデックスを持つ新形式） | `Extract/Nexas.{h,cpp}`（`CNexas`）。旧形式（先頭インデックス）は `Extract/Baldr.cpp` |
-| NeXAS 立ち絵（`.spm` による本体＋表情差分の合成、表情名付きファイル名） | `Extract/Nexas.cpp` の `ComposeSprites()`（一覧作成）と `CNexas::Decode()`（合成・出力） |
+| NeXAS 立ち絵（`.spm` による本体＋表情差分の合成、表情名付きファイル名） | `Extract/Nexas.cpp` の `ComposeSprites()`（一覧作成）と `CNexas::DecodeSprite()`（合成・出力） |
+| NeXAS イベント CG 差分（Visual.pac、座標は同じフォルダーの Config.pac 内 `visual.dat`） | `Extract/Nexas.cpp` の `ComposeVisuals()`（一覧作成）と `CNexas::DecodeVisual()`（合成・出力） |
 | エンジン系列ごとの形式 | `Extract/krkr/`（吉里吉里）, `Extract/paz/`, `Extract/cpz/`, `Extract/TCD/` |
 | 形式判定〜展開の全体フロー（Mount/Decode/Search の振り分け） | `Extract.cpp`（`CExtract`） |
 | 形式クラスの基底インターフェース | `ExtractBase.h`（`Mount` 必須、`Decode`/`Extract` は任意） |
@@ -118,6 +119,9 @@
 - 形式クラスで `SFileInfo::format = _T("zlib")` にすると、`Arc/Zlib.cpp`（`CZlib`）が展開し、名前が `.bmp` なら画像変換まで行う。独自の Decode を書く前にこれで足りるか確認する
 - `.spm` を含む NeXAS `.pac` は、部品 PNG と `.spm` を一覧から隠し、フレームごとの合成画像だけを出す（ユーザー要望: 部品は不要）。変換なしの抽出でも合成画像を出力する。名前は `<最前面の部品名>_<表情名>[_B].png`（`_B` は部品名の末尾に `_` が付く版。意味は要確認。表情名は `_` なし側の `.spm` から借りる）
 - 合成エントリーは `format = "SPM"`、`key` = フレーム番号、`starts`/`sizes_*`/`compress_checks` の [0] が `.spm`、[1..] が部品（`Himauri` と同じ流儀）
+- Visual.pac の差分エントリーは `format = "VISUAL"`、`key`/`type` = 差分の X/Y、[0] が本体 BMP、[1] が差分 BMP。名前は元のまま（表情名に相当する情報が無いため）。差分は 24bit BMP で黒 (0,0,0) を透明として上書きする（サムネイルと一致することを確認済み）
+- Visual.pac の合成は、同じフォルダーの Config.pac にある `<アーカイブ名>.dat`（列型 `2×8,1,1,2×4` の表）を読む（ユーザー合意: ゲームのフォルダー構成のまま使う前提）。Config.pac や表が無ければ従来どおり差分単体を一覧に出す。Config.pac 内の `.dat` は「列数・列型（1=文字列, 2=整数）・行…」の汎用表形式
+- NeXAS の `.pac` の一覧読み込みは `ReadPacIndex<Reader>()`（`CArcFile`/`YCFile` 共通。どちらも `SeekEnd(n)` は末尾から n 戻る）
 - `CPng::Decompress()` はスタブで PNG 読み込み機能は無い。PNG のデコードは libpng の簡易 API（`png_image_*_read_from_memory`）を直接使う
 - ソースは BOM なし UTF-8 だが `/utf-8` 無しの MultiByte ビルドなので、ソース（コメント含む）に日本語を書かない（Shift-JIS と誤解釈される）
 - `CExtract::m_decode_class` は全アーカイブ共通の static な集合なので、`Decode()`/`Extract()` は自分のエントリーか（`format`・拡張子・ヘッダー）を必ず確認して、違えば `false` を返す
@@ -132,6 +136,7 @@
 - 2026-09-27: VS2017 (v141, SDK 10.0.15063/17763) から VS2026 (v145, SDK 10.0) へ再ターゲット（旧 SDK が VS2026 で入手できないため）。廃止済みの `/Gm`（MinimalRebuild）が `/std:c++latest` と衝突するため Debug で無効化
 - 2026-09-27: NeXAS 新形式 `.pac` に対応（`CNexas`）。`CZlib::Decompress(u8*, u32*, ...)` が出力サイズを 0 で渡していた既存バグ（2019-02 のリファクタで混入）を修正
 - 2026-09-28: NeXAS `.pac` 内の `.spm` を解析し、立ち絵を合成済み画像（表情名付き）として一覧・出力するよう変更
+- 2026-09-28: Visual.pac のイベント CG 差分を、Config.pac の `visual.dat` の座標で本体に重ねた完成画像として出力するよう変更
 
 ---
 
