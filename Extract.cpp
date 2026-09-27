@@ -25,6 +25,7 @@
 #include "Extract/MeltyBlood.h"
 #include "Extract/Navel.h"
 #include "Extract/Nexas.h"
+#include "Extract/Pfs.h"
 #include "Extract/Nitro.h"
 #include "Extract/Nscr.h"
 #include "Extract/Oyatu.h"
@@ -136,6 +137,7 @@ void CExtract::SetClass()
 	static CNscr nscr;                  Class.push_back(&nscr);
 	static COyatu clOyatu;              Class.push_back(&clOyatu);
 	static CPajamas pajamas;            Class.push_back(&pajamas);
+	static CPfs pfs;                    Class.push_back(&pfs);
 	static CQLIE clQLIE;                Class.push_back(&clQLIE);
 	static CRetouch clRetouch;          Class.push_back(&clRetouch);
 	static CSpitan spitan;              Class.push_back(&spitan);

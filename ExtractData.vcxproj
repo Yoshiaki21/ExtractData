@@ -201,6 +201,7 @@
     <ClCompile Include="Extract\MeltyBlood.cpp" />
     <ClCompile Include="Extract\Navel.cpp" />
     <ClCompile Include="Extract\Nexas.cpp" />
+    <ClCompile Include="Extract\Pfs.cpp" />
     <ClCompile Include="Extract\Nitro.cpp" />
     <ClCompile Include="Extract\Nscr.cpp" />
     <ClCompile Include="Extract\Oyatu.cpp" />
@@ -351,6 +352,7 @@
     <ClInclude Include="Extract\MeltyBlood.h" />
     <ClInclude Include="Extract\Navel.h" />
     <ClInclude Include="Extract\Nexas.h" />
+    <ClInclude Include="Extract\Pfs.h" />
     <ClInclude Include="Extract\Nitro.h" />
     <ClInclude Include="Extract\Nscr.h" />
     <ClInclude Include="Extract\Oyatu.h" />
