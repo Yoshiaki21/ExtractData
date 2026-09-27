@@ -24,6 +24,7 @@
 #include "Extract/Majiro.h"
 #include "Extract/MeltyBlood.h"
 #include "Extract/Navel.h"
+#include "Extract/Nexas.h"
 #include "Extract/Nitro.h"
 #include "Extract/Nscr.h"
 #include "Extract/Oyatu.h"
@@ -113,6 +114,7 @@ void CExtract::SetClass()
 	static CAlcot alcot;                Class.push_back(&alcot);
 	static CAOS clAOS;                  Class.push_back(&clAOS);
 	static CAselia aselia;              Class.push_back(&aselia);
+	static CNexas nexas;                Class.push_back(&nexas); // Must precede CBaldr, which also accepts "PAC" archives
 	static CBaldr baldr;                Class.push_back(&baldr);
 	static CCircus clCircus;            Class.push_back(&clCircus);
 	static CCircusPak clCircusPak;      Class.push_back(&clCircusPak);

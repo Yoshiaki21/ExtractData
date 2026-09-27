@@ -103,6 +103,9 @@
     <ClCompile Include="Extract\Navel.cpp">
       <Filter>Source Files\Extract</Filter>
     </ClCompile>
+    <ClCompile Include="Extract\Nexas.cpp">
+      <Filter>Source Files\Extract</Filter>
+    </ClCompile>
     <ClCompile Include="Extract\Nitro.cpp">
       <Filter>Source Files\Extract</Filter>
     </ClCompile>
@@ -580,6 +583,9 @@
       <Filter>Source Files\Extract</Filter>
     </ClInclude>
     <ClInclude Include="Extract\Navel.h">
+      <Filter>Source Files\Extract</Filter>
+    </ClInclude>
+    <ClInclude Include="Extract\Nexas.h">
       <Filter>Source Files\Extract</Filter>
     </ClInclude>
     <ClInclude Include="Extract\Nitro.h">
