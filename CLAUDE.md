@@ -71,6 +71,8 @@
 | Giga NeXAS の `.pac`（末尾に Huffman 圧縮インデックスを持つ新形式） | `Extract/Nexas.{h,cpp}`（`CNexas`）。旧形式（先頭インデックス）は `Extract/Baldr.cpp` |
 | NeXAS 立ち絵（`.spm` による本体＋表情差分の合成、表情名付きファイル名） | `Extract/Nexas.cpp` の `ComposeSprites()`（一覧作成）と `CNexas::DecodeSprite()`（合成・出力） |
 | NeXAS イベント CG 差分（Visual.pac、座標は同じフォルダーの Config.pac 内 `visual.dat`） | `Extract/Nexas.cpp` の `ComposeVisuals()`（一覧作成）と `CNexas::DecodeVisual()`（合成・出力） |
+| Artemis の `.pfs`（`pf8`、ファイル一覧の SHA-1 で XOR 暗号化）と立ち絵の合成 | `Extract/Pfs.{h,cpp}`（`CPfs`）。組み合わせは `pc\ja\extra\exlist.ipt` の `exfgtable.fg`、座標は各 PNG の `tEXt` の `comment` = `pos,x,y,w,h` |
+| PNG のデコード／アルファ合成（形式クラス共通） | `Utils/ImageUtils.{h,cpp}`（`ImageUtils::DecodePng`, `BlendOver`） |
 | エンジン系列ごとの形式 | `Extract/krkr/`（吉里吉里）, `Extract/paz/`, `Extract/cpz/`, `Extract/TCD/` |
 | 形式判定〜展開の全体フロー（Mount/Decode/Search の振り分け） | `Extract.cpp`（`CExtract`） |
 | 形式クラスの基底インターフェース | `ExtractBase.h`（`Mount` 必須、`Decode`/`Extract` は任意） |
@@ -122,7 +124,11 @@
 - Visual.pac の差分エントリーは `format = "VISUAL"`、`key`/`type` = 差分の X/Y、[0] が本体 BMP、[1] が差分 BMP。名前は元のまま（表情名に相当する情報が無いため）。差分は 24bit BMP で黒 (0,0,0) を透明として上書きする（サムネイルと一致することを確認済み）
 - Visual.pac の合成は、同じフォルダーの Config.pac にある `<アーカイブ名>.dat`（列型 `2×8,1,1,2×4` の表）を読む（ユーザー合意: ゲームのフォルダー構成のまま使う前提）。Config.pac や表が無ければ従来どおり差分単体を一覧に出す。Config.pac 内の `.dat` は「列数・列型（1=文字列, 2=整数）・行…」の汎用表形式
 - NeXAS の `.pac` の一覧読み込みは `ReadPacIndex<Reader>()`（`CArcFile`/`YCFile` 共通。どちらも `SeekEnd(n)` は末尾から n 戻る）
-- `CPng::Decompress()` はスタブで PNG 読み込み機能は無い。PNG のデコードは libpng の簡易 API（`png_image_*_read_from_memory`）を直接使う
+- `CPng::Decompress()` はスタブで PNG 読み込み機能は無い。PNG のデコードは `Utils/ImageUtils` の `DecodePng()`（libpng の簡易 API）を使う
+- `.pfs` は `pf8` のみ対応（`pf6`/`pf2` はサンプルが無く未対応）。全エントリーが暗号化されているため、`CPfs::Decode()`/`Extract()` は自アーカイブの全エントリーを処理し、失敗時もエラー表示して `true` を返す（標準処理に流すと暗号化されたまま出力されるため）
+- `.pfs` の立ち絵は `no`/`z1`/`z2` が同じ絵の解像度違い（約1 : 1.75 : 2.5）なので、`z2` のみ合成する（ユーザー合意）。合成に使った `z2` の部品だけを隠し、それ以外（`no`/`z1`/`fa`、定義外の本体）はそのまま一覧に出す。名前は `image\fg\<キャラ>\z2\<本体名>_<顔ID>.png`（表情名の情報は無い）。顔の画像は漫符などで本体の外にはみ出すことがある（サンプルでは 16,904 件中 20 件）ため、キャンバスは本体と顔の外接矩形にする
+- `.pfs` 内のファイル名は UTF-8 なので、`CP_ACP` に変換して登録する
+- `exlist.ipt` は Lua の表形式のテキスト。`Pfs.cpp` に表の構築子だけを読む最小限のパーサー（`LuaTableReader`）がある
 - ソースは BOM なし UTF-8 だが `/utf-8` 無しの MultiByte ビルドなので、ソース（コメント含む）に日本語を書かない（Shift-JIS と誤解釈される）
 - `CExtract::m_decode_class` は全アーカイブ共通の static な集合なので、`Decode()`/`Extract()` は自分のエントリーか（`format`・拡張子・ヘッダー）を必ず確認して、違えば `false` を返す
 - `CNexas` と `CBaldr` はどちらも `.pac` + `"PAC"` で判定するため、`SetClass()` では `CNexas` を先に登録する（`CNexas` はインデックスを全件検証してから登録するので、旧形式は `CBaldr` に回る）
@@ -137,6 +143,7 @@
 - 2026-09-27: NeXAS 新形式 `.pac` に対応（`CNexas`）。`CZlib::Decompress(u8*, u32*, ...)` が出力サイズを 0 で渡していた既存バグ（2019-02 のリファクタで混入）を修正
 - 2026-09-28: NeXAS `.pac` 内の `.spm` を解析し、立ち絵を合成済み画像（表情名付き）として一覧・出力するよう変更
 - 2026-09-28: Visual.pac のイベント CG 差分を、Config.pac の `visual.dat` の座標で本体に重ねた完成画像として出力するよう変更
+- 2026-09-28: Artemis の `.pfs`（`pf8`）に対応し、立ち絵（`z2`）を合成済み画像として出力。PNG デコードとアルファ合成を `Utils/ImageUtils` に共通化
 
 ---
 
