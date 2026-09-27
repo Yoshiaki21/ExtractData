@@ -68,6 +68,7 @@
 |---|---|
 | アプリのエントリポイント / メインウィンドウ | `UI/WinMain.cpp`（`_tWinMain` → `CWinMain`） |
 | 新しいアーカイブ形式（ゲーム）への対応を追加 | `Extract/<Name>.{h,cpp}` に `CExtractBase` 派生クラスを作成 → `Extract.cpp` の `#include` と `CExtract::SetClass()` に登録 → `ExtractData.vcxproj` と `.filters` に追加 |
+| Giga NeXAS の `.pac`（末尾に Huffman 圧縮インデックスを持つ新形式） | `Extract/Nexas.{h,cpp}`（`CNexas`）。旧形式（先頭インデックス）は `Extract/Baldr.cpp` |
 | エンジン系列ごとの形式 | `Extract/krkr/`（吉里吉里）, `Extract/paz/`, `Extract/cpz/`, `Extract/TCD/` |
 | 形式判定〜展開の全体フロー（Mount/Decode/Search の振り分け） | `Extract.cpp`（`CExtract`） |
 | 形式クラスの基底インターフェース | `ExtractBase.h`（`Mount` 必須、`Decode`/`Extract` は任意） |
@@ -111,6 +112,9 @@
 - Windows / 32bit 専用（README の長期 TODO に Linux/macOS 対応あり）。x64 構成は実質無効
 - リポジトリにあるが vcxproj に含まれずビルドされないファイル: `Extract/FateFD.cpp`（旧版。現行は `Extract/krkr/FateFD`）, `Image/Jpg.cpp`, `Ini.cpp`, `UI/DataBase/*`, `UI/DragDrop/*`（意図的に外しているかは要確認）
 - `Crx` 形式は `Extract.cpp` 内でコメントアウトされ無効
+- `CArcFile::SeekEnd(offset)` は内部で `-offset` にして末尾基準でシークする。末尾から 4 バイト戻るなら `SeekEnd(4)`（`fseek` と同じ感覚で負の値を渡すと末尾より後ろに行く）
+- 形式クラスで `SFileInfo::format = _T("zlib")` にすると、`Arc/Zlib.cpp`（`CZlib`）が展開し、名前が `.bmp` なら画像変換まで行う。独自の Decode を書く前にこれで足りるか確認する
+- `CNexas` と `CBaldr` はどちらも `.pac` + `"PAC"` で判定するため、`SetClass()` では `CNexas` を先に登録する（`CNexas` はインデックスを全件検証してから登録するので、旧形式は `CBaldr` に回る）
 - ファイルを追加したら `ExtractData.vcxproj` と `ExtractData.vcxproj.filters` の両方を手動で更新する必要がある
 - 文字セットが MultiByte のため、ファイル名は Shift-JIS 前提。ソース内に日本語コメントあり（ファイルごとのエンコーディングは要確認）
 - zlib の vc14 プロジェクトは MASM ファイル（`Libs/zlib-1.2.11/contrib/masmx86`, `masmx64`）を参照する
@@ -119,6 +123,7 @@
 
 - 2026-09-27: CLAUDE.md 初回セットアップ（既存コードのスキャン結果を記入）
 - 2026-09-27: VS2017 (v141, SDK 10.0.15063/17763) から VS2026 (v145, SDK 10.0) へ再ターゲット（旧 SDK が VS2026 で入手できないため）。廃止済みの `/Gm`（MinimalRebuild）が `/std:c++latest` と衝突するため Debug で無効化
+- 2026-09-27: NeXAS 新形式 `.pac` に対応（`CNexas`）。`CZlib::Decompress(u8*, u32*, ...)` が出力サイズを 0 で渡していた既存バグ（2019-02 のリファクタで混入）を修正
 
 ---
 
