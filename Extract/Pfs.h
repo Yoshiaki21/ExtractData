@@ -9,8 +9,9 @@ struct SFileInfo;
 // lists all of them together.
 //
 // Standing sprites are stored as body and face parts that carry their screen position
-// in a PNG text chunk. When the extras table (exlist.ipt) is present, every body/face
-// combination of the largest size ("z2") is listed and extracted as one composed image.
+// in a PNG text chunk. When the extras table ("exlist") is present, every body/face
+// combination of the largest size ("z2") and of the message window faces ("fa") is listed
+// and extracted as one composed image.
 class CPfs final : public CExtractBase
 {
 public:

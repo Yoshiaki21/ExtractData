@@ -19,6 +19,19 @@ constexpr TCHAR sprite_format[] = _T("FG");
 // Sprites exist in three sizes that differ only in resolution; only the largest is composed
 constexpr char sprite_size[] = "z2";
 
+// Folders whose sprites are composed, and the size that their body names carry.
+// "fa" holds the message window faces, bust-up crops of the "no" bodies with their own faces.
+struct SpriteFolder
+{
+	const char* folder;
+	const char* body_size;
+};
+
+constexpr SpriteFolder sprite_folders[] = {
+	{sprite_size, sprite_size},
+	{"fa", "no"},
+};
+
 std::string ToLower(std::string str)
 {
 	for (auto& c : str)
@@ -405,7 +418,9 @@ bool ReadPngPosition(const std::vector<u8>& png, s32* x, s32* y)
 
 /// Replaces the standing sprite parts listed in `file_infos` with one entry per body/face combination.
 ///
-/// The combinations are taken from the extras table ("pc\<language>\extra\exlist.ipt").
+/// The combinations are taken from the extras table "exfgtable", which is stored in a file named
+/// "exlist" whose folder and extension differ between games ("pc\ja\extra\exlist.ipt",
+/// "system\table\exlist.tbl", ...).
 ///
 /// @param keys         Decryption keys by split archive ID
 /// @param parts        Split archive ID of each entry of `file_infos`
@@ -416,34 +431,48 @@ void ComposeSprites(CArcFile* archive, const std::vector<CPfs::Key>& keys, const
                     std::vector<bool>* hidden, std::vector<SFileInfo>* sprites, std::vector<u32>* sprite_parts)
 {
 	std::unordered_map<std::string, size_t> entries_by_name;
-	size_t table_entry = SIZE_MAX;
+	std::vector<size_t> table_candidates;
 
 	for (size_t i = 0; i < file_infos.size(); i++)
 	{
 		const std::string name = ToLower(file_infos[i].name.GetString());
 		entries_by_name.emplace(name, i);
 
-		// Prefer the Japanese table when there are several languages
-		if (EndsWith(name, "\\extra\\exlist.ipt") && (table_entry == SIZE_MAX || name.find("\\ja\\") != std::string::npos))
-			table_entry = i;
+		const size_t file_name_pos = name.find_last_of('\\') + 1; // 0 when there is no folder
+		const size_t extension_pos = name.find_last_of('.');
+		const size_t stem_end = extension_pos != std::string::npos && extension_pos > file_name_pos ? extension_pos : name.size();
+		if (name.compare(file_name_pos, stem_end - file_name_pos, "exlist") == 0)
+			table_candidates.push_back(i);
 	}
 
-	if (table_entry == SIZE_MAX)
-		return;
+	// Prefer the Japanese table when there are several languages
+	std::stable_partition(table_candidates.begin(), table_candidates.end(), [&file_infos](size_t i) {
+		return ToLower(file_infos[i].name.GetString()).find("\\ja\\") != std::string::npos;
+	});
 
-	std::vector<u8> table_data;
-	const u32 table_part = parts[table_entry];
-	archive->SetArcsID(table_part);
-	if (!ReadDecrypted(archive, file_infos[table_entry].start, file_infos[table_entry].size_cmp, keys[table_part], &table_data))
-		return;
-
+	// Use the first candidate that actually holds the sprite table
 	LuaValue table;
-	LuaTableReader reader(std::string(table_data.begin(), table_data.end()));
-	if (!reader.ReadAssignment("exfgtable", &table))
-		return;
+	const LuaValue* fg = nullptr;
+	const LuaValue* sizes = nullptr;
+	for (const size_t candidate : table_candidates)
+	{
+		std::vector<u8> table_data;
+		const u32 table_part = parts[candidate];
+		archive->SetArcsID(table_part);
+		if (!ReadDecrypted(archive, file_infos[candidate].start, file_infos[candidate].size_cmp, keys[table_part], &table_data))
+			continue;
 
-	const LuaValue* fg = table.Field("fg");
-	const LuaValue* sizes = fg != nullptr ? fg->Field("size") : nullptr;
+		table = LuaValue();
+		LuaTableReader reader(std::string(table_data.begin(), table_data.end()));
+		if (!reader.ReadAssignment("exfgtable", &table))
+			continue;
+
+		fg = table.Field("fg");
+		sizes = fg != nullptr ? fg->Field("size") : nullptr;
+		if (sizes != nullptr)
+			break;
+	}
+
 	if (sizes == nullptr)
 		return;
 
@@ -478,40 +507,46 @@ void ComposeSprites(CArcFile* archive, const std::vector<CPfs::Key>& keys, const
 		if (path == nullptr || head == nullptr || outfits == nullptr || poses == nullptr || faces == nullptr)
 			continue;
 
-		// ":fg/ame/" -> "image\fg\ame\z2\"
-		std::string dir = path->scalar;
-		if (!dir.empty() && dir[0] == ':')
-			dir.erase(0, 1);
+		// ":fg/ame/" -> "image\fg\ame\"
+		std::string character_dir = path->scalar;
+		if (!character_dir.empty() && character_dir[0] == ':')
+			character_dir.erase(0, 1);
 
-		dir = "image/" + dir + sprite_size + "/";
-		std::replace(dir.begin(), dir.end(), '/', '\\');
+		character_dir = "image/" + character_dir;
+		std::replace(character_dir.begin(), character_dir.end(), '/', '\\');
 
-		for (const auto& outfit : outfits->Scalars())
+		for (const auto& sprite_folder : sprite_folders)
 		{
-			for (const auto& pose : poses->items)
+			// e.g. "image\fg\ame\z2\"
+			const std::string dir = character_dir + sprite_folder.folder + "\\";
+
+			for (const auto& outfit : outfits->Scalars())
 			{
-				const std::vector<std::string> pose_fields = pose.Scalars();
-				if (pose_fields.size() < 2)
-					continue;
-
-				const std::string& letter = pose_fields[0];
-				const std::string body_stem = head->scalar + sprite_size + letter + outfit + pose_fields[1] + "0";
-
-				const size_t body = find_entry(dir + body_stem + ".png");
-				const LuaValue* pose_faces = faces->Field(letter.c_str());
-				if (body == SIZE_MAX || pose_faces == nullptr)
-					continue;
-
-				for (const auto& face_id : pose_faces->Scalars())
+				for (const auto& pose : poses->items)
 				{
-					// Both parts are read from the same file when composing
-					const size_t face = find_entry(dir + face_id + ".png");
-					if (face == SIZE_MAX || parts[face] != parts[body])
+					const std::vector<std::string> pose_fields = pose.Scalars();
+					if (pose_fields.size() < 2)
 						continue;
 
-					combinations.push_back({body, face, dir + body_stem + "_" + face_id + ".png"});
-					uses[body]++;
-					uses[face]++;
+					const std::string& letter = pose_fields[0];
+					const std::string body_stem = head->scalar + sprite_folder.body_size + letter + outfit + pose_fields[1] + "0";
+
+					const size_t body = find_entry(dir + body_stem + ".png");
+					const LuaValue* pose_faces = faces->Field(letter.c_str());
+					if (body == SIZE_MAX || pose_faces == nullptr)
+						continue;
+
+					for (const auto& face_id : pose_faces->Scalars())
+					{
+						// Both parts are read from the same file when composing
+						const size_t face = find_entry(dir + face_id + ".png");
+						if (face == SIZE_MAX || parts[face] != parts[body])
+							continue;
+
+						combinations.push_back({body, face, dir + body_stem + "_" + face_id + ".png"});
+						uses[body]++;
+						uses[face]++;
+					}
 				}
 			}
 		}
@@ -547,6 +582,46 @@ void ComposeSprites(CArcFile* archive, const std::vector<CPfs::Key>& keys, const
 		sprite_parts->push_back(parts[combination.body]);
 		(*hidden)[combination.body] = true;
 		(*hidden)[combination.face] = true;
+	}
+}
+
+/// Hides the "no" and "z1" standing sprite parts, which are the "z2" parts at lower resolutions.
+///
+/// A part is only hidden when its "z2" counterpart exists, so no picture is lost. Other folders
+/// such as "fa" (message window faces) are different pictures and are kept.
+void HideLowResolutionSprites(const std::vector<SFileInfo>& file_infos, std::vector<bool>* hidden)
+{
+	static const std::string root = "image\\fg\\";
+
+	std::unordered_set<std::string> names;
+	for (const auto& file_info : file_infos)
+		names.insert(ToLower(file_info.name.GetString()));
+
+	for (size_t i = 0; i < file_infos.size(); i++)
+	{
+		// "image\fg\<character>\<size>\<file>"
+		const std::string name = ToLower(file_infos[i].name.GetString());
+		if (name.compare(0, root.size(), root) != 0)
+			continue;
+
+		const size_t size_pos = name.find('\\', root.size());
+		const size_t file_pos = size_pos != std::string::npos ? name.find('\\', size_pos + 1) : std::string::npos;
+		if (file_pos == std::string::npos || name.find('\\', file_pos + 1) != std::string::npos)
+			continue;
+
+		const std::string character = name.substr(root.size(), size_pos - root.size());
+		const std::string size = name.substr(size_pos + 1, file_pos - size_pos - 1);
+		if (size != "no" && size != "z1")
+			continue;
+
+		// Bodies carry the size in their name ("ame_noa0900.png" -> "ame_z2a0900.png"); faces do not
+		std::string file = name.substr(file_pos + 1);
+		const std::string sized_prefix = character + "_" + size;
+		if (file.compare(0, sized_prefix.size(), sized_prefix) == 0)
+			file = character + "_" + sprite_size + file.substr(sized_prefix.size());
+
+		if (names.count(root + character + "\\" + sprite_size + "\\" + file) != 0)
+			(*hidden)[i] = true;
 	}
 }
 
@@ -605,6 +680,7 @@ bool CPfs::Mount(CArcFile* archive)
 	std::vector<SFileInfo> sprites;
 	std::vector<u32> sprite_parts;
 	ComposeSprites(archive, keys, file_infos, parts, &hidden, &sprites, &sprite_parts);
+	HideLowResolutionSprites(file_infos, &hidden);
 
 	for (size_t i = 0; i < file_infos.size(); i++)
 	{
