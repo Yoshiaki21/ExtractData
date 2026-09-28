@@ -71,7 +71,7 @@
 | Giga NeXAS の `.pac`（末尾に Huffman 圧縮インデックスを持つ新形式） | `Extract/Nexas.{h,cpp}`（`CNexas`）。旧形式（先頭インデックス）は `Extract/Baldr.cpp` |
 | NeXAS 立ち絵（`.spm` による本体＋表情差分の合成、表情名付きファイル名） | `Extract/Nexas.cpp` の `ComposeSprites()`（一覧作成）と `CNexas::DecodeSprite()`（合成・出力） |
 | NeXAS イベント CG 差分（Visual.pac、座標は同じフォルダーの Config.pac 内 `visual.dat`） | `Extract/Nexas.cpp` の `ComposeVisuals()`（一覧作成）と `CNexas::DecodeVisual()`（合成・出力） |
-| Artemis の `.pfs`（`pf8`、ファイル一覧の SHA-1 で XOR 暗号化）と立ち絵の合成 | `Extract/Pfs.{h,cpp}`（`CPfs`）。組み合わせは `pc\ja\extra\exlist.ipt` の `exfgtable.fg`、座標は各 PNG の `tEXt` の `comment` = `pos,x,y,w,h` |
+| Artemis の `.pfs`（`pf8`、ファイル一覧の SHA-1 で XOR 暗号化）と立ち絵の合成 | `Extract/Pfs.{h,cpp}`（`CPfs`）。組み合わせはファイル名が `exlist` の表（`exfgtable.fg`）、座標は各 PNG の `tEXt` の `comment` = `pos,x,y,w,h` |
 | PNG のデコード／アルファ合成（形式クラス共通） | `Utils/ImageUtils.{h,cpp}`（`ImageUtils::DecodePng`, `BlendOver`） |
 | エンジン系列ごとの形式 | `Extract/krkr/`（吉里吉里）, `Extract/paz/`, `Extract/cpz/`, `Extract/TCD/` |
 | 形式判定〜展開の全体フロー（Mount/Decode/Search の振り分け） | `Extract.cpp`（`CExtract`） |
@@ -126,11 +126,12 @@
 - NeXAS の `.pac` の一覧読み込みは `ReadPacIndex<Reader>()`（`CArcFile`/`YCFile` 共通。どちらも `SeekEnd(n)` は末尾から n 戻る）
 - `CPng::Decompress()` はスタブで PNG 読み込み機能は無い。PNG のデコードは `Utils/ImageUtils` の `DecodePng()`（libpng の簡易 API）を使う
 - `.pfs` は `pf8` のみ対応（`pf6`/`pf2` はサンプルが無く未対応）。全エントリーが暗号化されているため、`CPfs::Decode()`/`Extract()` は自アーカイブの全エントリーを処理し、失敗時もエラー表示して `true` を返す（標準処理に流すと暗号化されたまま出力されるため）
-- `.pfs` の立ち絵は `no`/`z1`/`z2` が同じ絵の解像度違い（約1 : 1.75 : 2.5）なので、`z2` のみ合成する（ユーザー合意）。合成に使った `z2` の部品だけを隠し、それ以外（`no`/`z1`/`fa`、定義外の本体）はそのまま一覧に出す。名前は `image\fg\<キャラ>\z2\<本体名>_<顔ID>.png`（表情名の情報は無い）。顔の画像は漫符などで本体の外にはみ出すことがある（サンプルでは 16,904 件中 20 件）ため、キャンバスは本体と顔の外接矩形にする
+- `.pfs` の立ち絵は `no`/`z1`/`z2` が同じ絵の解像度違い（約1 : 1.75 : 2.5）なので、`z2` のみ合成する（ユーザー合意）。合成に使った `z2` の部品を隠す。`no`/`z1` の部品は `z2` の低解像度版なので、同名（本体は `<キャラ>_no`/`_z1` → `_z2`）の `z2` 版が実在する場合に隠す（ユーザー合意）。`fa`（メッセージ窓の顔アイコン。本体は `no` と同名のバストアップ切り抜きで顔が空白、顔は `fa` 専用の別画像）も同じ組み合わせ表で合成する（ユーザー合意。名前は `image\fg\<キャラ>\fa\<キャラ>_no…_<顔ID>.png`）。合成に使われない部品（表に無い `f`/`g` の顔、表に無いキャラなど）はそのまま一覧に出す。名前は `image\fg\<キャラ>\z2\<本体名>_<顔ID>.png`（表情名の情報は無い）。顔の画像は漫符などで本体の外にはみ出すことがある（サンプルでは 16,904 件中 20 件）ため、キャンバスは本体と顔の外接矩形にする
 - `.pfs` 内のファイル名は UTF-8 なので、`CP_ACP` に変換して登録する
 - `.pfs` のゲームデータは `xxx.pfs`・`xxx.pfs.000`・`xxx.pfs.001`… に分割されている（サンプル: 本体／ボイス／イベント CG）。`xxx.pfs` を開くと同じフォルダーの番号付きファイルも `CArcFile::Open()` で追加して1つの一覧にする。番号付きファイルを直接開いた場合はそのファイルだけ（ユーザー合意: 案A。3つ同時に選ぶと重複するため）。同名ファイルは先のファイルを優先して重複を除く（中身は同一だった）。鍵は分割ファイルごと（`m_keys` はパス別）
 - 分割アーカイブは `CArcFile` の仕組みを使う: `Open()` で開くと現在の分割番号がそのファイルに切り替わり、`AddFileInfo()` がその番号を `arcs_id` に記録、展開時は `CExtract::Decode()` が `SetArcsID()` で切り替える（前例: `Extract/LostChild.cpp`）。`Open()` はファイルが無いとエラー表示するので、事前に `PathFileExists()` で確認する
-- `exlist.ipt` は Lua の表形式のテキスト。`Pfs.cpp` に表の構築子だけを読む最小限のパーサー（`LuaTableReader`）がある
+- 立ち絵の組み合わせ表は、置き場所と拡張子がゲームごとに違う（`pc\ja\extra\exlist.ipt`、`system\table\exlist.tbl` など。ゲーム側の `system\extra\exfg.lua` の `e:include(...)` が読み込み先）。そのため「ファイル名（拡張子を除く）が `exlist` のもの」を候補にし、`\ja\` を含むものを優先して、`exfgtable.fg` が読めた最初のものを使う（ユーザー合意）。表が見つからなければ合成せず、部品はすべてそのまま出る
+- `exlist` の表は Lua の表形式のテキスト。`Pfs.cpp` に表の構築子だけを読む最小限のパーサー（`LuaTableReader`）がある
 - ソースは BOM なし UTF-8 だが `/utf-8` 無しの MultiByte ビルドなので、ソース（コメント含む）に日本語を書かない（Shift-JIS と誤解釈される）
 - `CExtract::m_decode_class` は全アーカイブ共通の static な集合なので、`Decode()`/`Extract()` は自分のエントリーか（`format`・拡張子・ヘッダー）を必ず確認して、違えば `false` を返す
 - `CNexas` と `CBaldr` はどちらも `.pac` + `"PAC"` で判定するため、`SetClass()` では `CNexas` を先に登録する（`CNexas` はインデックスを全件検証してから登録するので、旧形式は `CBaldr` に回る）
@@ -147,6 +148,7 @@
 - 2026-09-28: Visual.pac のイベント CG 差分を、Config.pac の `visual.dat` の座標で本体に重ねた完成画像として出力するよう変更
 - 2026-09-28: Artemis の `.pfs`（`pf8`）に対応し、立ち絵（`z2`）を合成済み画像として出力。PNG デコードとアルファ合成を `Utils/ImageUtils` に共通化
 - 2026-09-28: `.pfs` の分割ファイル（`.pfs.000`・`.pfs.001`…）に対応。`.pfs` を開くと全分割ファイルをまとめて読み込む
+- 2026-09-28: `.pfs` の立ち絵の組み合わせ表を、場所・拡張子によらずファイル名 `exlist` で探すよう変更（`hamidashi.pfs` では `system\table\exlist.tbl` だったため）。あわせて `no`/`z1` の立ち絵部品を一覧から除外し、`fa`（顔アイコン）も合成するよう変更
 
 ---
 
